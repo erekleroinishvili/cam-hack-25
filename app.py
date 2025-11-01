@@ -1,9 +1,7 @@
-# app.py
 from io import BytesIO
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, send_from_directory, jsonify
 from PIL import Image
 import numpy as np
-from flask import send_from_directory
 
 try:
     from skimage.color import rgb2lab
@@ -67,6 +65,35 @@ def simple_sort_curve_permutation(src_rgb, tgt_rgb, xy_weight=0.25):
 
     return out_flat.reshape(H, W, 3)
 
+def compute_perm_map(src_rgb, tgt_rgb, xy_weight=0.25):
+    """
+    Returns a 1D int array perm of length N, where
+    perm[target_index] = source_index
+    """
+    H, W, _ = src_rgb.shape
+    N = H * W
+
+    src_lab = to_lab01(src_rgb)  # (N,3)
+    tgt_lab = to_lab01(tgt_rgb)  # (N,3)
+
+    ys, xs = np.mgrid[0:H, 0:W]
+    xs = (xs.astype(np.float32) / max(W - 1, 1)).reshape(-1, 1)
+    ys = (ys.astype(np.float32) / max(H - 1, 1)).reshape(-1, 1)
+
+    src_feat = np.concatenate([src_lab, xy_weight * xs, xy_weight * ys], axis=1)
+    tgt_feat = np.concatenate([tgt_lab, xy_weight * xs, xy_weight * ys], axis=1)
+
+    src_key = src_feat.sum(axis=1)
+    tgt_key = tgt_feat.sum(axis=1)
+
+    order_s = np.argsort(src_key, kind="mergesort")
+    order_t = np.argsort(tgt_key, kind="mergesort")
+
+    # Build perm: for each rank k, the k-th source goes to the k-th target
+    perm = np.empty(N, dtype=np.int32)
+    perm[order_t] = order_s  # perm[target_index] = source_index
+    return perm.reshape(-1)
+
 def load_image(file_storage, max_side=None):
     im = Image.open(file_storage.stream).convert("RGB")
     if max_side:
@@ -116,6 +143,34 @@ def index():
 def ui():
     # Serve the index.html file from the current folder (".")
     return send_from_directory(".", "index.html")
+
+@app.route("/perm_map", methods=["POST"])
+def perm_map_route():
+    if "src" not in request.files or "tgt" not in request.files:
+        return jsonify({"error": "Upload 'src' and 'tgt' image files"}), 400
+
+    try:
+        max_side = int(request.form.get("max_side", "256"))
+    except:
+        max_side = 256
+    try:
+        xy_weight = float(request.form.get("xy_weight", "0.25"))
+    except:
+        xy_weight = 0.25
+
+    src_im = load_image(request.files["src"], max_side=max_side)
+    tgt_im = load_image(request.files["tgt"], max_side=max_side)
+
+    # Ensure identical size
+    tgt_size = tgt_im.size
+    src_im = src_im.resize(tgt_size, Image.BILINEAR)
+
+    src = np.array(src_im, dtype=np.uint8)
+    tgt = np.array(tgt_im, dtype=np.uint8)
+
+    perm = compute_perm_map(src, tgt, xy_weight=xy_weight)
+    W, H = tgt_size
+    return jsonify({"width": W, "height": H, "perm": perm.tolist()})
 
 if __name__ == "__main__":
     # Run: python app.py  (then open index.html in a browser)

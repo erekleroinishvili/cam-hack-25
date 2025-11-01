@@ -46,7 +46,11 @@
       <input id="xyWeight" type="number" step="0.05" min="0" max="2" value="0.25" />
     </label>
     <button id="goBtn" disabled>Transform</button>
+    <button id="animBtn" disabled>Animate</button>
   </div>
+
+  <canvas id="animCanvas" style="max-width: 100%; border:1px solid #ddd; border-radius:8px;"></canvas>
+  <div id="animStatus" class="hint"></div>
 
   <script>
     const srcInput = document.getElementById('src');
@@ -102,5 +106,152 @@
       }
     });
   </script>
+
+  <script>
+    const animBtn = document.getElementById('animBtn');
+    const animCanvas = document.getElementById('animCanvas');
+    const animStatus = document.getElementById('animStatus');
+
+    let lastUploadSrcBlob = null;
+    let lastUploadTgtBlob = null;
+
+    // Track selected files so we can reuse for animation
+    srcInput.addEventListener('change', () => { lastUploadSrcBlob = srcInput.files[0] || null; });
+    tgtInput.addEventListener('change', () => { lastUploadTgtBlob = tgtInput.files[0] || null; });
+
+    // Enable Animate when both files present
+    function updateAnimEnabled() {
+        animBtn.disabled = !(lastUploadSrcBlob && lastUploadTgtBlob);
+    }
+    srcInput.addEventListener('change', updateAnimEnabled);
+    tgtInput.addEventListener('change', updateAnimEnabled);
+
+    animBtn.addEventListener('click', async () => {
+        if (!lastUploadSrcBlob || !lastUploadTgtBlob) return;
+        animStatus.textContent = 'Preparing animation…';
+        animBtn.disabled = true;
+
+        // 1) Ask backend for permutation map (same params as transform)
+        const fd = new FormData();
+        fd.append('src', lastUploadSrcBlob);
+        fd.append('tgt', lastUploadTgtBlob);
+        fd.append('max_side', document.getElementById('maxSide').value);
+        fd.append('xy_weight', document.getElementById('xyWeight').value);
+
+        let perm, W, H;
+        try {
+        const resp = await fetch('/perm_map', { method: 'POST', body: fd });
+        if (!resp.ok) throw new Error('perm_map failed');
+        const js = await resp.json();
+        W = js.width; H = js.height; perm = js.perm;
+        } catch (e) {
+        animStatus.textContent = 'Failed to get permutation map.';
+        animBtn.disabled = false;
+        return;
+        }
+
+        // 2) Load the source image pixels at (W,H)
+        const srcBitmap = await createImageBitmap(lastUploadSrcBlob);
+        // Draw into an offscreen canvas to read pixels
+        const srcCan = new OffscreenCanvas(W, H);
+        const srcCtx = srcCan.getContext('2d', { willReadFrequently: true });
+        // Fit source to (W,H) just like backend does
+        srcCtx.drawImage(srcBitmap, 0, 0, W, H);
+        const srcImg = srcCtx.getImageData(0, 0, W, H);
+        const srcData = srcImg.data; // Uint8ClampedArray RGBA, length 4*N
+
+        // 3) Prepare animation canvas
+        animCanvas.width = W;
+        animCanvas.height = H;
+        const ctx = animCanvas.getContext('2d', { willReadFrequently: true });
+
+        // Precompute positions for speed
+        const N = W * H;
+        const x0 = new Float32Array(N);
+        const y0 = new Float32Array(N);
+        const x1 = new Float32Array(N);
+        const y1 = new Float32Array(N);
+
+        // source index -> (x0,y0)
+        for (let s = 0; s < N; s++) {
+        x0[s] = s % W;
+        y0[s] = (s / W) | 0;
+        }
+        // target index -> (x1,y1), and we already have perm[target] = source
+        for (let t = 0; t < N; t++) {
+        x1[t] = t % W;
+        y1[t] = (t / W) | 0;
+        }
+
+        const durationMs = 2000; // 2 seconds
+        const fps = 30;
+        const frameMs = 1000 / fps;
+        let start = performance.now();
+
+        // We’ll write directly into an ImageData each frame
+        const frameImg = ctx.createImageData(W, H);
+        const frameData = frameImg.data;
+
+        function drawFrame(now) {
+        let t = (now - start) / durationMs;
+        if (t > 1) t = 1;
+
+        // Clear frame
+        // (ImageData is recreated each frame anyway; no need to clear explicitly)
+
+        // For each TARGET pixel index j, find its SOURCE index i = perm[j].
+        // Interpolate from source position (x0[i],y0[i]) to target (x1[j],y1[j]).
+        // Then "splat" the source color at the interpolated position.
+        // We round to nearest integer cell for simplicity.
+        // (Optional: draw 2x2 splats to reduce holes.)
+        frameData.fill(0);
+        for (let j = 0; j < N; j++) {
+            const i = perm[j];
+
+            const sx = x0[i], sy = y0[i];
+            const tx = x1[j], ty = y1[j];
+
+            const xi = Math.round(sx * (1 - t) + tx * t);
+            const yi = Math.round(sy * (1 - t) + ty * t);
+            if (xi < 0 || xi >= W || yi < 0 || yi >= H) continue;
+
+            const srcOfs = i * 4;
+            const r = srcData[srcOfs + 0];
+            const g = srcData[srcOfs + 1];
+            const b = srcData[srcOfs + 2];
+            const a = 255;
+
+            // Write a tiny 1x1 splat
+            const ofs = (yi * W + xi) * 4;
+            frameData[ofs + 0] = r;
+            frameData[ofs + 1] = g;
+            frameData[ofs + 2] = b;
+            frameData[ofs + 3] = a;
+
+            // Optional: 2x2 splat for fewer holes (uncomment if you like)
+            // for (let dy = 0; dy <= 1; dy++) for (let dx = 0; dx <= 1; dx++) {
+            //   const xj = xi + dx, yj = yi + dy;
+            //   if (xj >= 0 && xj < W && yj >= 0 && yj < H) {
+            //     const o = (yj * W + xj) * 4;
+            //     frameData[o+0] = r; frameData[o+1] = g; frameData[o+2] = b; frameData[o+3] = a;
+            //   }
+            // }
+        }
+
+        ctx.putImageData(frameImg, 0, 0);
+
+        if (t < 1) {
+            setTimeout(() => requestAnimationFrame(drawFrame), frameMs);
+        } else {
+            animStatus.textContent = 'Animation complete.';
+            animBtn.disabled = false;
+        }
+        }
+
+        animStatus.textContent = 'Animating…';
+        requestAnimationFrame(drawFrame);
+    });
+  </script>
+
 </body>
 </html>
