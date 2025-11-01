@@ -1,0 +1,105 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Pixel Permuter — Same Pixels, Different Truth</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    .row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; flex: 1; min-width: 280px; }
+    .card h3 { margin-top: 0; }
+    .preview { width: 100%; max-height: 360px; object-fit: contain; background: #f6f6f6; border-radius: 8px; }
+    .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+    button { padding: 10px 16px; border-radius: 10px; border: none; background: black; color: white; cursor: pointer; }
+    button:disabled { background: #666; cursor: default; }
+    .hint { color: #666; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>Pixel Permuter</h1>
+  <p class="hint">Upload a <b>source</b> image (pixels we must reuse) and a <b>target</b> image (look-alike). The output uses exactly the source pixels, just rearranged.</p>
+
+  <div class="row">
+    <div class="card">
+      <h3>Source image</h3>
+      <input id="src" type="file" accept="image/*" />
+      <img id="srcPreview" class="preview" />
+    </div>
+    <div class="card">
+      <h3>Target image</h3>
+      <input id="tgt" type="file" accept="image/*" />
+      <img id="tgtPreview" class="preview" />
+    </div>
+    <div class="card">
+      <h3>Output (permuted)</h3>
+      <img id="outPreview" class="preview" />
+      <div id="status" class="hint"></div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <label>Max side:
+      <input id="maxSide" type="number" min="64" max="1024" value="256" />
+    </label>
+    <label>XY weight:
+      <input id="xyWeight" type="number" step="0.05" min="0" max="2" value="0.25" />
+    </label>
+    <button id="goBtn" disabled>Transform</button>
+  </div>
+
+  <script>
+    const srcInput = document.getElementById('src');
+    const tgtInput = document.getElementById('tgt');
+    const srcPreview = document.getElementById('srcPreview');
+    const tgtPreview = document.getElementById('tgtPreview');
+    const outPreview = document.getElementById('outPreview');
+    const goBtn = document.getElementById('goBtn');
+    const statusEl = document.getElementById('status');
+
+    function readPreview(input, imgEl) {
+      const f = input.files && input.files[0];
+      if (!f) { imgEl.src = ''; return; }
+      const url = URL.createObjectURL(f);
+      imgEl.src = url;
+    }
+
+    function canGo() {
+      goBtn.disabled = !(srcInput.files.length && tgtInput.files.length);
+    }
+
+    srcInput.addEventListener('change', () => { readPreview(srcInput, srcPreview); canGo(); });
+    tgtInput.addEventListener('change', () => { readPreview(tgtInput, tgtPreview); canGo(); });
+
+    document.getElementById('goBtn').addEventListener('click', async () => {
+      if (!srcInput.files[0] || !tgtInput.files[0]) return;
+      statusEl.textContent = 'Transforming…';
+      goBtn.disabled = true;
+      outPreview.src = '';
+
+      const fd = new FormData();
+      fd.append('src', srcInput.files[0]);
+      fd.append('tgt', tgtInput.files[0]);
+      fd.append('max_side', document.getElementById('maxSide').value);
+      fd.append('xy_weight', document.getElementById('xyWeight').value);
+
+      try {
+        const resp = await fetch('http://127.0.0.1:5000/transform', { method: 'POST', body: fd });
+        if (!resp.ok) {
+          const msg = await resp.text();
+          statusEl.textContent = `Error: ${msg}`;
+        } else {
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          outPreview.src = url;
+          statusEl.textContent = 'Done.';
+        }
+      } catch (e) {
+        statusEl.textContent = 'Request failed. Is the Python server running on 127.0.0.1:5000?';
+      } finally {
+        goBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
