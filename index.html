@@ -84,7 +84,8 @@
       fd.append('xy_weight', document.getElementById('xyWeight').value);
 
       try {
-        const resp = await fetch('http://127.0.0.1:5000/transform', { method: 'POST', body: fd });
+        const resp = await fetch('/transform', { method: 'POST', body: fd });
+
         if (!resp.ok) {
           const msg = await resp.text();
           statusEl.textContent = `Error: ${msg}`;

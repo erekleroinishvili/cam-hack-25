@@ -3,6 +3,7 @@ from io import BytesIO
 from flask import Flask, request, send_file, jsonify
 from PIL import Image
 import numpy as np
+from flask import send_from_directory
 
 try:
     from skimage.color import rgb2lab
@@ -110,6 +111,11 @@ def transform_route():
 @app.route("/")
 def index():
     return "Open index.html locally and it will POST to /transform on this server."
+
+@app.route("/ui")
+def ui():
+    # Serve the index.html file from the current folder (".")
+    return send_from_directory(".", "index.html")
 
 if __name__ == "__main__":
     # Run: python app.py  (then open index.html in a browser)
