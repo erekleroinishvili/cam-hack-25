@@ -56,6 +56,18 @@
         <span id="durationValue">2.0</span>s
     </label>
     <button id="animBtn" disabled>Animate</button>
+    <button id="exportKeyBtn" disabled>Export Transform Key</button>
+    <button id="exportOutputBtn" disabled>Export Output Image</button>
+  </div>
+
+  <div class="controls">
+    <label>Import Transform Key:
+      <input id="keyFile" type="file" accept=".json" />
+    </label>
+    <label>Import Transformed Image:
+      <input id="transformedImageFile" type="file" accept="image/*" />
+    </label>
+    <button id="reverseBtn" disabled>Reverse Animation</button>
   </div>
 
   <canvas id="animCanvas" style="max-width: 100%; border:1px solid #ddd; border-radius:8px;"></canvas>
@@ -128,9 +140,16 @@
     const animBtn = document.getElementById('animBtn');
     const animCanvas = document.getElementById('animCanvas');
     const animStatus = document.getElementById('animStatus');
+    const exportKeyBtn = document.getElementById('exportKeyBtn');
+    const exportOutputBtn = document.getElementById('exportOutputBtn');
+    const reverseBtn = document.getElementById('reverseBtn');
+    const keyFileInput = document.getElementById('keyFile');
+    const transformedImageFileInput = document.getElementById('transformedImageFile');
 
     let lastUploadSrcBlob = null;
     let lastUploadTgtBlob = null;
+    let lastTransformKey = null; // Store the transformation key
+    let lastTransformedImageBlob = null; // Store imported transformed image
 
     // Track selected files so we can reuse for animation
     srcInput.addEventListener('change', () => { lastUploadSrcBlob = srcInput.files[0] || null; });
@@ -139,6 +158,9 @@
     // Enable Animate when both files present
     function updateAnimEnabled() {
         animBtn.disabled = !(lastUploadSrcBlob && lastUploadTgtBlob);
+        exportKeyBtn.disabled = !lastTransformKey;
+        exportOutputBtn.disabled = !outPreview.src;
+        reverseBtn.disabled = !(lastTransformKey && lastTransformedImageBlob);
     }
     srcInput.addEventListener('change', updateAnimEnabled);
     tgtInput.addEventListener('change', updateAnimEnabled);
@@ -161,6 +183,20 @@
         if (!resp.ok) throw new Error('perm_map failed');
         const js = await resp.json();
         W = js.width; H = js.height; perm = js.perm;
+
+        // Store the transformation key
+        lastTransformKey = {
+            perm: perm,
+            width: W,
+            height: H,
+            swirlStrength: 4.0 * Math.PI, // Must match the animation code
+            centerX: W / 2,
+            centerY: H / 2,
+            maxSide: parseInt(document.getElementById('maxSide').value),
+            xyWeight: parseFloat(document.getElementById('xyWeight').value),
+            timestamp: new Date().toISOString()
+        };
+        updateAnimEnabled();
         } catch (e) {
         animStatus.textContent = 'Failed to get permutation map.';
         animBtn.disabled = false;
@@ -214,23 +250,53 @@
         let t = (now - start) / durationMs;
         if (t > 1) t = 1;
 
-        // Clear frame
-        // (ImageData is recreated each frame anyway; no need to clear explicitly)
+        // Easing function for smoother animation
+        const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 
-        // For each TARGET pixel index j, find its SOURCE index i = perm[j].
-        // Interpolate from source position (x0[i],y0[i]) to target (x1[j],y1[j]).
-        // Then "splat" the source color at the interpolated position.
-        // We round to nearest integer cell for simplicity.
-        // (Optional: draw 2x2 splats to reduce holes.)
+        // Swirl parameters - these define the spiral motion
+        // The key insight: these parameters are DETERMINISTIC and REVERSIBLE
+        // To undo the animation, use the same params with t reversed and src/tgt swapped
+        const centerX = W / 2;
+        const centerY = H / 2;
+        const maxDist = Math.sqrt(centerX * centerX + centerY * centerY);
+
+        // Swirl strength: how many radians to rotate based on distance from center
+        const swirlStrength = 4.0 * Math.PI; // 2 full rotations
+
+        // Clear frame
         frameData.fill(0);
+
         for (let j = 0; j < N; j++) {
             const i = perm[j];
 
             const sx = x0[i], sy = y0[i];
             const tx = x1[j], ty = y1[j];
 
-            const xi = Math.round(sx * (1 - t) + tx * t);
-            const yi = Math.round(sy * (1 - t) + ty * t);
+            // Linear interpolation
+            const lerpX = sx * (1 - eased) + tx * eased;
+            const lerpY = sy * (1 - eased) + ty * eased;
+
+            // Calculate swirl effect based on distance from center
+            const dx = lerpX - centerX;
+            const dy = lerpY - centerY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const normalizedDist = Math.min(dist / maxDist, 1.0);
+
+            // Rotation angle: more rotation when t is in the middle (0.5)
+            // and based on distance from center
+            const tProgress = 1 - eased; // Inverse so it unswirls as it drops
+            const rotationAngle = swirlStrength * normalizedDist * tProgress * Math.sin(Math.PI * eased);
+
+            // Apply rotation around center
+            const cosA = Math.cos(rotationAngle);
+            const sinA = Math.sin(rotationAngle);
+            const rotX = dx * cosA - dy * sinA;
+            const rotY = dx * sinA + dy * cosA;
+
+            // Final position with swirl applied
+            const xi = Math.round(centerX + rotX);
+            const yi = Math.round(centerY + rotY);
+
             if (xi < 0 || xi >= W || yi < 0 || yi >= H) continue;
 
             const srcOfs = i * 4;
@@ -239,21 +305,19 @@
             const b = srcData[srcOfs + 2];
             const a = 255;
 
-            // Write a tiny 1x1 splat
-            const ofs = (yi * W + xi) * 4;
-            frameData[ofs + 0] = r;
-            frameData[ofs + 1] = g;
-            frameData[ofs + 2] = b;
-            frameData[ofs + 3] = a;
-
-            // Optional: 2x2 splat for fewer holes (uncomment if you like)
-            // for (let dy = 0; dy <= 1; dy++) for (let dx = 0; dx <= 1; dx++) {
-            //   const xj = xi + dx, yj = yi + dy;
-            //   if (xj >= 0 && xj < W && yj >= 0 && yj < H) {
-            //     const o = (yj * W + xj) * 4;
-            //     frameData[o+0] = r; frameData[o+1] = g; frameData[o+2] = b; frameData[o+3] = a;
-            //   }
-            // }
+            // Write a 2x2 splat to reduce holes during swirl
+            for (let dy = 0; dy <= 1; dy++) {
+                for (let dx = 0; dx <= 1; dx++) {
+                    const xj = xi + dx, yj = yi + dy;
+                    if (xj >= 0 && xj < W && yj >= 0 && yj < H) {
+                        const o = (yj * W + xj) * 4;
+                        frameData[o+0] = r;
+                        frameData[o+1] = g;
+                        frameData[o+2] = b;
+                        frameData[o+3] = a;
+                    }
+                }
+            }
         }
 
         ctx.putImageData(frameImg, 0, 0);
@@ -263,10 +327,220 @@
         } else {
             animStatus.textContent = 'Animation complete.';
             animBtn.disabled = false;
+            updateAnimEnabled();
         }
         }
 
         animStatus.textContent = 'Animating…';
+        requestAnimationFrame(drawFrame);
+    });
+
+    // Export transformation key
+    exportKeyBtn.addEventListener('click', () => {
+        if (!lastTransformKey) return;
+
+        const keyJson = JSON.stringify(lastTransformKey, null, 2);
+        const blob = new Blob([keyJson], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `transform-key-${Date.now()}.json`;
+        a.click();
+
+        URL.revokeObjectURL(url);
+        animStatus.textContent = 'Transform key exported!';
+    });
+
+    // Export output image
+    exportOutputBtn.addEventListener('click', async () => {
+        if (!outPreview.src) return;
+
+        try {
+            const response = await fetch(outPreview.src);
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `transformed-output-${Date.now()}.png`;
+            a.click();
+
+            URL.revokeObjectURL(url);
+            animStatus.textContent = 'Output image exported!';
+        } catch (e) {
+            animStatus.textContent = 'Failed to export output image.';
+        }
+    });
+
+    // Import transformation key
+    keyFileInput.addEventListener('change', async () => {
+        const file = keyFileInput.files[0];
+        if (!file) return;
+
+        try {
+            const text = await file.text();
+            const key = JSON.parse(text);
+
+            // Validate the key has required fields
+            if (!key.perm || !key.width || !key.height) {
+                throw new Error('Invalid key file');
+            }
+
+            lastTransformKey = key;
+            updateAnimEnabled();
+            animStatus.textContent = `Transform key loaded: ${key.width}x${key.height}`;
+        } catch (e) {
+            animStatus.textContent = 'Failed to load transform key: ' + e.message;
+        }
+    });
+
+    // Import transformed image for reversing
+    transformedImageFileInput.addEventListener('change', () => {
+        const file = transformedImageFileInput.files[0];
+        if (!file) {
+            lastTransformedImageBlob = null;
+            updateAnimEnabled();
+            return;
+        }
+
+        lastTransformedImageBlob = file;
+        updateAnimEnabled();
+        animStatus.textContent = `Transformed image loaded: ${file.name}`;
+    });
+
+    // Reverse animation - apply inverse transformation
+    reverseBtn.addEventListener('click', async () => {
+        if (!lastTransformKey || !lastTransformedImageBlob) {
+            animStatus.textContent = 'Need both a transform key and transformed image!';
+            return;
+        }
+
+        animStatus.textContent = 'Preparing reverse animation…';
+        reverseBtn.disabled = true;
+
+        const key = lastTransformKey;
+        const W = key.width;
+        const H = key.height;
+
+        // Load the transformed image from the imported file
+        const srcBitmap = await createImageBitmap(lastTransformedImageBlob);
+
+        // Get pixel data from transformed image
+        const srcCan = new OffscreenCanvas(W, H);
+        const srcCtx = srcCan.getContext('2d', { willReadFrequently: true });
+        srcCtx.drawImage(srcBitmap, 0, 0, W, H);
+        const srcImg = srcCtx.getImageData(0, 0, W, H);
+        const srcData = srcImg.data;
+
+        // Prepare animation canvas
+        animCanvas.width = W;
+        animCanvas.height = H;
+        const ctx = animCanvas.getContext('2d', { willReadFrequently: true });
+
+        // Build INVERSE permutation: if perm[t] = s, then invPerm[s] = t
+        const N = W * H;
+        const invPerm = new Int32Array(N);
+        for (let t = 0; t < N; t++) {
+            invPerm[key.perm[t]] = t;
+        }
+
+        // Precompute positions
+        const x0 = new Float32Array(N);
+        const y0 = new Float32Array(N);
+        const x1 = new Float32Array(N);
+        const y1 = new Float32Array(N);
+
+        // Now source is the output image (current state), target is original positions
+        for (let s = 0; s < N; s++) {
+            x0[s] = s % W;
+            y0[s] = (s / W) | 0;
+        }
+        for (let t = 0; t < N; t++) {
+            x1[t] = t % W;
+            y1[t] = (t / W) | 0;
+        }
+
+        const durationSec = parseFloat(document.getElementById('durationSec').value);
+        const durationMs = durationSec * 1000;
+        const fps = 30;
+        const frameMs = 1000 / fps;
+        let start = performance.now();
+
+        const frameImg = ctx.createImageData(W, H);
+        const frameData = frameImg.data;
+
+        function drawFrame(now) {
+            let t = (now - start) / durationMs;
+            if (t > 1) t = 1;
+
+            const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+            const centerX = key.centerX;
+            const centerY = key.centerY;
+            const maxDist = Math.sqrt(centerX * centerX + centerY * centerY);
+            const swirlStrength = key.swirlStrength;
+
+            frameData.fill(0);
+
+            for (let j = 0; j < N; j++) {
+                const i = invPerm[j];
+
+                const sx = x0[i], sy = y0[i];
+                const tx = x1[j], ty = y1[j];
+
+                const lerpX = sx * (1 - eased) + tx * eased;
+                const lerpY = sy * (1 - eased) + ty * eased;
+
+                const dx = lerpX - centerX;
+                const dy = lerpY - centerY;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const normalizedDist = Math.min(dist / maxDist, 1.0);
+
+                const tProgress = 1 - eased;
+                const rotationAngle = swirlStrength * normalizedDist * tProgress * Math.sin(Math.PI * eased);
+
+                const cosA = Math.cos(rotationAngle);
+                const sinA = Math.sin(rotationAngle);
+                const rotX = dx * cosA - dy * sinA;
+                const rotY = dx * sinA + dy * cosA;
+
+                const xi = Math.round(centerX + rotX);
+                const yi = Math.round(centerY + rotY);
+
+                if (xi < 0 || xi >= W || yi < 0 || yi >= H) continue;
+
+                const srcOfs = i * 4;
+                const r = srcData[srcOfs + 0];
+                const g = srcData[srcOfs + 1];
+                const b = srcData[srcOfs + 2];
+                const a = 255;
+
+                for (let dy = 0; dy <= 1; dy++) {
+                    for (let dx = 0; dx <= 1; dx++) {
+                        const xj = xi + dx, yj = yi + dy;
+                        if (xj >= 0 && xj < W && yj >= 0 && yj < H) {
+                            const o = (yj * W + xj) * 4;
+                            frameData[o+0] = r;
+                            frameData[o+1] = g;
+                            frameData[o+2] = b;
+                            frameData[o+3] = a;
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(frameImg, 0, 0);
+
+            if (t < 1) {
+                setTimeout(() => requestAnimationFrame(drawFrame), frameMs);
+            } else {
+                animStatus.textContent = 'Reverse animation complete - original image recovered!';
+                reverseBtn.disabled = false;
+            }
+        }
+
+        animStatus.textContent = 'Reversing animation…';
         requestAnimationFrame(drawFrame);
     });
   </script>
