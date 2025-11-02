@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Fluid Pixel Flow — Unintended Behaviour</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #eee;
+      text-align: center;
+      margin: 0;
+      padding: 20px;
+    }
+    canvas {
+      border-radius: 8px;
+      background: #000;
+      margin-top: 10px;
+    }
+    .controls {
+      margin: 12px 0;
+      display: flex;
+      justify-content: center;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    input[type=range] { width: 120px; }
+  </style>
+</head>
+<body>
+  <h2>🎨 Fluid Pixel Flow</h2>
+  <p>Upload a base image — pixels will flow to follow your webcam feed</p>
+
+  <input type="file" id="baseImageInput" accept="image/*"><br>
+
+  <div class="controls">
+    <label>XY weight: <input id="xyWeight" type="range" min="0" max="1" step="0.05" value="0.3"></label>
+    <label>Resemblance: <input id="resemblance" type="range" min="0" max="1" step="0.05" value="0.4"></label>
+    <label>Speed: <input id="speed" type="range" min="0.01" max="0.5" step="0.01" value="0.15"></label>
+  </div>
+
+  <video id="liveVideo" autoplay playsinline muted style="visibility:hidden;"></video>
+  <canvas id="flowCanvas" width="256" height="256"></canvas>
+
+  <script>
+  const baseInput = document.getElementById('baseImageInput');
+  const video = document.getElementById('liveVideo');
+  const canvas = document.getElementById('flowCanvas');
+  const ctx = canvas.getContext('2d');
+
+  video.addEventListener('loadeddata', () => {
+    console.log('Video feed loaded successfully');
+  });
+
+  let baseColors, W = 256, H = 256;
+  let x, y; // current pixel positions
+  let initialized = false;
+
+  // ask for webcam access
+  navigator.mediaDevices.getUserMedia({ video: true })
+    .then(stream => { video.srcObject = stream; })
+    .catch(err => alert('Webcam error: ' + err));
+
+  // when base image uploaded
+  baseInput.onchange = async () => {
+    const img = new Image();
+    img.src = URL.createObjectURL(baseInput.files[0]);
+    await img.decode();
+
+    canvas.width = W;
+    canvas.height = H;
+
+    // draw and read base pixels
+    const temp = document.createElement('canvas');
+    temp.width = W; temp.height = H;
+    const tctx = temp.getContext('2d');
+    tctx.drawImage(img, 0, 0, W, H);
+    baseColors = tctx.getImageData(0, 0, W, H).data;
+
+    const N = W * H;
+    x = new Float32Array(N);
+    y = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      x[i] = i % W;
+      y[i] = Math.floor(i / W);
+    }
+
+    initialized = true;
+    requestAnimationFrame(animate);
+  };
+
+  function animate() {
+    if (!initialized) { requestAnimationFrame(animate); return; }
+
+    const xyWeight = parseFloat(document.getElementById('xyWeight').value);
+    const resemblance = parseFloat(document.getElementById('resemblance').value);
+    const speed = parseFloat(document.getElementById('speed').value);
+
+    // capture current video frame
+    const tmp = document.createElement('canvas');
+    tmp.width = W; tmp.height = H;
+    const vctx = tmp.getContext('2d');
+    vctx.drawImage(video, 0, 0, W, H);
+    const frame = vctx.getImageData(0, 0, W, H).data;
+
+    const N = W * H;
+    const out = ctx.createImageData(W, H);
+    const outData = out.data;
+
+    // target positions (jitter to create motion)
+    const newX = new Float32Array(N);
+    const newY = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const jitter = 4 * (1 - xyWeight);
+      newX[i] = (x[i] + (Math.random() - 0.5) * jitter + W) % W;
+      newY[i] = (y[i] + (Math.random() - 0.5) * jitter + H) % H;
+    }
+
+    // move pixels gradually toward new positions
+    for (let i = 0; i < N; i++) {
+      x[i] += speed * (newX[i] - x[i]);
+      y[i] += speed * (newY[i] - y[i]);
+    }
+
+    // paint pixels
+    for (let i = 0; i < N; i++) {
+      const xi = Math.round(x[i]);
+      const yi = Math.round(y[i]);
+      if (xi < 0 || xi >= W || yi < 0 || yi >= H) continue;
+
+      const srcIdx = i * 4;
+      const videoIdx = (yi * W + xi) * 4;
+
+      // blend between base color and live frame color
+      for (let k = 0; k < 3; k++) {
+        outData[srcIdx + k] =
+          resemblance * baseColors[srcIdx + k] +
+          (1 - resemblance) * frame[videoIdx + k];
+      }
+      outData[srcIdx + 3] = 255;
+    }
+
+    ctx.putImageData(out, 0, 0);
+    requestAnimationFrame(animate);
+  }
+  </script>
+</body>
+</html>
