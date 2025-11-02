@@ -14,6 +14,11 @@
     button { padding: 10px 16px; border-radius: 10px; border: none; background: black; color: white; cursor: pointer; }
     button:disabled { background: #666; cursor: default; }
     .hint { color: #666; font-size: 0.9em; }
+
+    input[type=range] { /* slider style */
+      width: 120px;
+      vertical-align: middle;
+    }
   </style>
 </head>
 <body>
@@ -46,6 +51,10 @@
       <input id="xyWeight" type="number" step="0.05" min="0" max="2" value="0.25" />
     </label>
     <button id="goBtn" disabled>Transform</button>
+    <label>Duration (sec):
+        <input id="durationSec" type="range" min="1" max="10" step="0.5" value="2" />
+        <span id="durationValue">2.0</span>s
+    </label>
     <button id="animBtn" disabled>Animate</button>
   </div>
 
@@ -108,6 +117,14 @@
   </script>
 
   <script>
+    const durationSlider = document.getElementById('durationSec');
+    const durationValue = document.getElementById('durationValue');
+
+    // Show the numeric value beside the slider
+    durationSlider.addEventListener('input', () => {
+    durationValue.textContent = durationSlider.value;
+    });
+
     const animBtn = document.getElementById('animBtn');
     const animCanvas = document.getElementById('animCanvas');
     const animStatus = document.getElementById('animStatus');
@@ -183,7 +200,8 @@
         y1[t] = (t / W) | 0;
         }
 
-        const durationMs = 2000; // 2 seconds
+        const durationSec = parseFloat(document.getElementById('durationSec').value);
+        const durationMs = durationSec * 1000; // previously had 2000ms default
         const fps = 30;
         const frameMs = 1000 / fps;
         let start = performance.now();
