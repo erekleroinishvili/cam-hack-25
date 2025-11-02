@@ -42,32 +42,36 @@
     <label>XY weight: <input id="xyWeight" type="range" min="0" max="1" step="0.05" value="0.3"></label>
     <label>Resemblance: <input id="resemblance" type="range" min="0" max="1" step="0.05" value="0.4"></label>
     <label>Speed: <input id="speed" type="range" min="0.01" max="0.5" step="0.01" value="0.15"></label>
+    <label>FPS: <input id="fps" type="range" min="1" max="60" step="1" value="30"></label>
+  </div>
+
+  <!-- Add toggles for the additional effects -->
+  <div class="effects-controls">
+    <label><input type="checkbox" id="enableWarping" checked> Enable Pixel Warping</label>
+    <label><input type="checkbox" id="enableColorShift" checked> Enable Color Shifts</label>
+    <label><input type="checkbox" id="enableGlitches" checked> Enable Glitches</label>
   </div>
 
   <video id="liveVideo" autoplay playsinline muted style="visibility:hidden;"></video>
   <canvas id="flowCanvas" width="256" height="256"></canvas>
 
   <script>
-  const baseInput = document.getElementById('baseImageInput');
-  const video = document.getElementById('liveVideo');
-  const canvas = document.getElementById('flowCanvas');
-  const ctx = canvas.getContext('2d');
+    const baseInput = document.getElementById('baseImageInput');
+    const video = document.getElementById('liveVideo');
+    const canvas = document.getElementById('flowCanvas');
+    const ctx = canvas.getContext('2d');
 
-  video.addEventListener('loadeddata', () => {
-    console.log('Video feed loaded successfully');
-  });
+    let baseColors, W = 256, H = 256;
+    let x, y; // current pixel positions
+    let initialized = false;
 
-  let baseColors, W = 256, H = 256;
-  let x, y; // current pixel positions
-  let initialized = false;
-
-  // ask for webcam access
-  navigator.mediaDevices.getUserMedia({ video: true })
+    // ask for webcam access
+    navigator.mediaDevices.getUserMedia({ video: true })
     .then(stream => { video.srcObject = stream; })
     .catch(err => alert('Webcam error: ' + err));
 
-  // when base image uploaded
-  baseInput.onchange = async () => {
+    // when base image uploaded
+    baseInput.onchange = async () => {
     const img = new Image();
     img.src = URL.createObjectURL(baseInput.files[0]);
     await img.decode();
@@ -86,16 +90,37 @@
     x = new Float32Array(N);
     y = new Float32Array(N);
     for (let i = 0; i < N; i++) {
-      x[i] = i % W;
-      y[i] = Math.floor(i / W);
+        x[i] = i % W;
+        y[i] = Math.floor(i / W);
     }
 
     initialized = true;
     requestAnimationFrame(animate);
-  };
+    };
 
-  function animate() {
-    if (!initialized) { requestAnimationFrame(animate); return; }
+    // FPS Control
+    let lastFrameTime = Date.now();
+    let frameProgress = 0;  // Track progress for smooth animation
+
+    function animate() {
+    const fps = parseInt(document.getElementById('fps').value);
+    const fpsInterval = 1000 / fps;  // FPS interval in milliseconds
+
+    let now = Date.now();
+    let elapsed = now - lastFrameTime;
+
+    if (elapsed > fpsInterval) {
+        // Update the frame time
+        lastFrameTime = now - (elapsed % fpsInterval);
+
+        renderFrame(elapsed);
+    }
+
+    requestAnimationFrame(animate);
+    }
+
+    function renderFrame(elapsed) {
+    if (!initialized) return;
 
     const xyWeight = parseFloat(document.getElementById('xyWeight').value);
     const resemblance = parseFloat(document.getElementById('resemblance').value);
@@ -112,42 +137,53 @@
     const out = ctx.createImageData(W, H);
     const outData = out.data;
 
-    // target positions (jitter to create motion)
+    // Apply Pixel Warping effect if enabled
+    let warpAmount = 0;
+    if (document.getElementById('enableWarping').checked) {
+        warpAmount = 10 + Math.sin(Date.now() / 1000) * 20;  // Make warping more dramatic
+    }
+
     const newX = new Float32Array(N);
     const newY = new Float32Array(N);
+
     for (let i = 0; i < N; i++) {
-      const jitter = 4 * (1 - xyWeight);
-      newX[i] = (x[i] + (Math.random() - 0.5) * jitter + W) % W;
-      newY[i] = (y[i] + (Math.random() - 0.5) * jitter + H) % H;
+        const jitter = 4 * (1 - xyWeight) + warpAmount;  // Add warping to jitter
+        newX[i] = (x[i] + (Math.random() - 0.5) * jitter + W) % W;
+        newY[i] = (y[i] + (Math.random() - 0.5) * jitter + H) % H;
+
+        // Apply color shift if enabled
+        let colorShift = 0;
+        if (document.getElementById('enableColorShift').checked) {
+        colorShift = Math.random() * 30 - 15;  // Apply stronger color shifts
+        }
+
+        // Apply glitch effect if enabled
+        if (document.getElementById('enableGlitches').checked && Math.random() < 0.1) {
+        colorShift = Math.random() * 100 - 50;  // Larger glitch effect
+        }
+
+        // Blend base color and live frame color with optional effects
+        for (let k = 0; k < 3; k++) {
+        // Apply resemblance and add the color shift
+        outData[i * 4 + k] =
+            resemblance * baseColors[i * 4 + k] +
+            (1 - resemblance) * (frame[i * 4 + k] + colorShift);
+        }
+        outData[i * 4 + 3] = 255; // Set full opacity
     }
 
-    // move pixels gradually toward new positions
+    // Smooth pixel movement based on time elapsed
+    const smoothFactor = Math.min(elapsed / 1000, 1);  // Blend frames smoothly
     for (let i = 0; i < N; i++) {
-      x[i] += speed * (newX[i] - x[i]);
-      y[i] += speed * (newY[i] - y[i]);
+        x[i] += smoothFactor * (newX[i] - x[i]);
+        y[i] += smoothFactor * (newY[i] - y[i]);
     }
 
-    // paint pixels
-    for (let i = 0; i < N; i++) {
-      const xi = Math.round(x[i]);
-      const yi = Math.round(y[i]);
-      if (xi < 0 || xi >= W || yi < 0 || yi >= H) continue;
-
-      const srcIdx = i * 4;
-      const videoIdx = (yi * W + xi) * 4;
-
-      // blend between base color and live frame color
-      for (let k = 0; k < 3; k++) {
-        outData[srcIdx + k] =
-          resemblance * baseColors[srcIdx + k] +
-          (1 - resemblance) * frame[videoIdx + k];
-      }
-      outData[srcIdx + 3] = 255;
-    }
-
+    // Paint the image to the canvas
     ctx.putImageData(out, 0, 0);
-    requestAnimationFrame(animate);
-  }
+    }
+
+
   </script>
 </body>
 </html>
